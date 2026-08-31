@@ -1,9 +1,11 @@
-// +build linux
+// SPDX-License-Identifier: BSD-3-Clause
+//go:build linux
 
 package docker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,8 +13,8 @@ import (
 	"strconv"
 	"strings"
 
-	cpu "github.com/shirou/gopsutil/cpu"
-	"github.com/shirou/gopsutil/internal/common"
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/internal/common"
 )
 
 // GetDockerStat returns a list of Docker basic stats.
@@ -22,13 +24,11 @@ func GetDockerStat() ([]CgroupDockerStat, error) {
 }
 
 func GetDockerStatWithContext(ctx context.Context) ([]CgroupDockerStat, error) {
-	path, err := exec.LookPath("docker")
+	out, err := invoke.CommandWithContext(ctx, "docker", "ps", "-a", "--no-trunc", "--format", "{{.ID}}|{{.Image}}|{{.Names}}|{{.Status}}")
 	if err != nil {
-		return nil, ErrDockerNotAvailable
-	}
-
-	out, err := invoke.CommandWithContext(ctx, path, "ps", "-a", "--no-trunc", "--format", "{{.ID}}|{{.Image}}|{{.Names}}|{{.Status}}")
-	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return nil, ErrDockerNotAvailable
+		}
 		return []CgroupDockerStat{}, err
 	}
 	lines := strings.Split(string(out), "\n")
@@ -56,20 +56,18 @@ func GetDockerStatWithContext(ctx context.Context) ([]CgroupDockerStat, error) {
 	return ret, nil
 }
 
-// GetDockerIDList returnes a list of DockerID.
+// GetDockerIDList returns a list of DockerID.
 // This requires certain permission.
 func GetDockerIDList() ([]string, error) {
 	return GetDockerIDListWithContext(context.Background())
 }
 
 func GetDockerIDListWithContext(ctx context.Context) ([]string, error) {
-	path, err := exec.LookPath("docker")
+	out, err := invoke.CommandWithContext(ctx, "docker", "ps", "-q", "--no-trunc")
 	if err != nil {
-		return nil, ErrDockerNotAvailable
-	}
-
-	out, err := invoke.CommandWithContext(ctx, path, "ps", "-q", "--no-trunc")
-	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return nil, ErrDockerNotAvailable
+		}
 		return []string{}, err
 	}
 	lines := strings.Split(string(out), "\n")
@@ -85,53 +83,66 @@ func GetDockerIDListWithContext(ctx context.Context) ([]string, error) {
 	return ret, nil
 }
 
-// CgroupCPU returnes specified cgroup id CPU status.
+// CgroupCPU returns specified cgroup id CPU status.
 // containerID is same as docker id if you use docker.
 // If you use container via systemd.slice, you could use
 // containerID = docker-<container id>.scope and base=/sys/fs/cgroup/cpuacct/system.slice/
-func CgroupCPU(containerID string, base string) (*cpu.TimesStat, error) {
+func CgroupCPU(containerID, base string) (*CgroupCPUStat, error) {
 	return CgroupCPUWithContext(context.Background(), containerID, base)
 }
 
-// CgroupCPUUsage returnes specified cgroup id CPU usage.
+// CgroupCPUUsage returns specified cgroup id CPU usage.
 // containerID is same as docker id if you use docker.
 // If you use container via systemd.slice, you could use
 // containerID = docker-<container id>.scope and base=/sys/fs/cgroup/cpuacct/system.slice/
-func CgroupCPUUsage(containerID string, base string) (float64, error) {
+func CgroupCPUUsage(containerID, base string) (float64, error) {
 	return CgroupCPUUsageWithContext(context.Background(), containerID, base)
 }
 
-func CgroupCPUWithContext(ctx context.Context, containerID string, base string) (*cpu.TimesStat, error) {
-	statfile := getCgroupFilePath(containerID, base, "cpuacct", "cpuacct.stat")
+func CgroupCPUWithContext(ctx context.Context, containerID, base string) (*CgroupCPUStat, error) {
+	statfile, err := getCgroupFilePath(ctx, containerID, base, "cpuacct", "cpuacct.stat")
+	if err != nil {
+		return nil, err
+	}
 	lines, err := common.ReadLines(statfile)
 	if err != nil {
 		return nil, err
 	}
 	// empty containerID means all cgroup
-	if len(containerID) == 0 {
+	if containerID == "" {
 		containerID = "all"
 	}
-	ret := &cpu.TimesStat{CPU: containerID}
+
+	ret := &CgroupCPUStat{}
+	ret.CPU = containerID
 	for _, line := range lines {
 		fields := strings.Split(line, " ")
 		if fields[0] == "user" {
 			user, err := strconv.ParseFloat(fields[1], 64)
 			if err == nil {
-				ret.User = user / cpu.CPUTick
+				ret.User = user / cpu.ClocksPerSec
 			}
 		}
 		if fields[0] == "system" {
 			system, err := strconv.ParseFloat(fields[1], 64)
 			if err == nil {
-				ret.System = system / cpu.CPUTick
+				ret.System = system / cpu.ClocksPerSec
 			}
 		}
 	}
+	usage, err := CgroupCPUUsageWithContext(ctx, containerID, base)
+	if err != nil {
+		return nil, err
+	}
+	ret.Usage = usage
 	return ret, nil
 }
 
 func CgroupCPUUsageWithContext(ctx context.Context, containerID, base string) (float64, error) {
-	usagefile := getCgroupFilePath(containerID, base, "cpuacct", "cpuacct.usage")
+	usagefile, err := getCgroupFilePath(ctx, containerID, base, "cpuacct", "cpuacct.usage")
+	if err != nil {
+		return 0.0, err
+	}
 	lines, err := common.ReadLinesOffsetN(usagefile, 0, 1)
 	if err != nil {
 		return 0.0, err
@@ -145,31 +156,34 @@ func CgroupCPUUsageWithContext(ctx context.Context, containerID, base string) (f
 	return ns / nanoseconds, nil
 }
 
-func CgroupCPUDocker(containerid string) (*cpu.TimesStat, error) {
-	return CgroupCPUDockerWithContext(context.Background(), containerid)
+func CgroupCPUDocker(containerID string) (*CgroupCPUStat, error) {
+	return CgroupCPUDockerWithContext(context.Background(), containerID)
 }
 
-func CgroupCPUUsageDocker(containerid string) (float64, error) {
-	return CgroupCPUDockerUsageWithContext(context.Background(), containerid)
+func CgroupCPUUsageDocker(containerID string) (float64, error) {
+	return CgroupCPUDockerUsageWithContext(context.Background(), containerID)
 }
 
-func CgroupCPUDockerWithContext(ctx context.Context, containerid string) (*cpu.TimesStat, error) {
-	return CgroupCPU(containerid, common.HostSys("fs/cgroup/cpuacct/docker"))
+func CgroupCPUDockerWithContext(ctx context.Context, containerID string) (*CgroupCPUStat, error) {
+	return CgroupCPUWithContext(ctx, containerID, common.HostSysWithContext(ctx, "fs/cgroup/cpuacct/docker"))
 }
 
-func CgroupCPUDockerUsageWithContext(ctx context.Context, containerid string) (float64, error) {
-	return CgroupCPUUsage(containerid, common.HostSys("fs/cgroup/cpuacct/docker"))
+func CgroupCPUDockerUsageWithContext(ctx context.Context, containerID string) (float64, error) {
+	return CgroupCPUUsageWithContext(ctx, containerID, common.HostSysWithContext(ctx, "fs/cgroup/cpuacct/docker"))
 }
 
-func CgroupMem(containerID string, base string) (*CgroupMemStat, error) {
+func CgroupMem(containerID, base string) (*CgroupMemStat, error) {
 	return CgroupMemWithContext(context.Background(), containerID, base)
 }
 
-func CgroupMemWithContext(ctx context.Context, containerID string, base string) (*CgroupMemStat, error) {
-	statfile := getCgroupFilePath(containerID, base, "memory", "memory.stat")
+func CgroupMemWithContext(ctx context.Context, containerID, base string) (*CgroupMemStat, error) {
+	statfile, err := getCgroupFilePath(ctx, containerID, base, "memory", "memory.stat")
+	if err != nil {
+		return nil, err
+	}
 
 	// empty containerID means all cgroup
-	if len(containerID) == 0 {
+	if containerID == "" {
 		containerID = "all"
 	}
 	lines, err := common.ReadLines(statfile)
@@ -188,9 +202,9 @@ func CgroupMemWithContext(ctx context.Context, containerID string, base string) 
 			ret.Cache = v
 		case "rss":
 			ret.RSS = v
-		case "rssHuge":
+		case "rssHuge", "rss_huge":
 			ret.RSSHuge = v
-		case "mappedFile":
+		case "mappedFile", "mapped_file":
 			ret.MappedFile = v
 		case "pgpgin":
 			ret.Pgpgin = v
@@ -241,19 +255,19 @@ func CgroupMemWithContext(ctx context.Context, containerID string, base string) 
 		}
 	}
 
-	r, err := getCgroupMemFile(containerID, base, "memory.usage_in_bytes")
+	r, err := getCgroupMemFile(ctx, containerID, base, "memory.usage_in_bytes")
 	if err == nil {
 		ret.MemUsageInBytes = r
 	}
-	r, err = getCgroupMemFile(containerID, base, "memory.max_usage_in_bytes")
+	r, err = getCgroupMemFile(ctx, containerID, base, "memory.max_usage_in_bytes")
 	if err == nil {
 		ret.MemMaxUsageInBytes = r
 	}
-	r, err = getCgroupMemFile(containerID, base, "memoryLimitInBbytes")
+	r, err = getCgroupMemFile(ctx, containerID, base, "memory.limit_in_bytes")
 	if err == nil {
 		ret.MemLimitInBytes = r
 	}
-	r, err = getCgroupMemFile(containerID, base, "memoryFailcnt")
+	r, err = getCgroupMemFile(ctx, containerID, base, "memory.failcnt")
 	if err == nil {
 		ret.MemFailCnt = r
 	}
@@ -266,27 +280,35 @@ func CgroupMemDocker(containerID string) (*CgroupMemStat, error) {
 }
 
 func CgroupMemDockerWithContext(ctx context.Context, containerID string) (*CgroupMemStat, error) {
-	return CgroupMem(containerID, common.HostSys("fs/cgroup/memory/docker"))
+	return CgroupMemWithContext(ctx, containerID, common.HostSysWithContext(ctx, "fs/cgroup/memory/docker"))
 }
 
 // getCgroupFilePath constructs file path to get targeted stats file.
-func getCgroupFilePath(containerID, base, target, file string) string {
-	if len(base) == 0 {
-		base = common.HostSys(fmt.Sprintf("fs/cgroup/%s/docker", target))
+func getCgroupFilePath(ctx context.Context, containerID, base, target, file string) (string, error) {
+	// Prevent a caller-supplied containerID from escaping the cgroup base
+	// directory via path separators or ".." traversal.
+	if strings.ContainsAny(containerID, `/\`) || strings.Contains(containerID, "..") {
+		return "", fmt.Errorf("invalid container ID %q", containerID)
+	}
+	if base == "" {
+		base = common.HostSysWithContext(ctx, fmt.Sprintf("fs/cgroup/%s/docker", target))
 	}
 	statfile := path.Join(base, containerID, file)
 
 	if _, err := os.Stat(statfile); os.IsNotExist(err) {
 		statfile = path.Join(
-			common.HostSys(fmt.Sprintf("fs/cgroup/%s/system.slice", target)), "docker-"+containerID+".scope", file)
+			common.HostSysWithContext(ctx, fmt.Sprintf("fs/cgroup/%s/system.slice", target)), "docker-"+containerID+".scope", file)
 	}
 
-	return statfile
+	return statfile, nil
 }
 
 // getCgroupMemFile reads a cgroup file and return the contents as uint64.
-func getCgroupMemFile(containerID, base, file string) (uint64, error) {
-	statfile := getCgroupFilePath(containerID, base, "memory", file)
+func getCgroupMemFile(ctx context.Context, containerID, base, file string) (uint64, error) {
+	statfile, err := getCgroupFilePath(ctx, containerID, base, "memory", file)
+	if err != nil {
+		return 0, err
+	}
 	lines, err := common.ReadLines(statfile)
 	if err != nil {
 		return 0, err

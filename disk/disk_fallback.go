@@ -1,33 +1,30 @@
-// +build !darwin,!linux,!freebsd,!openbsd,!windows,!solaris
+// SPDX-License-Identifier: BSD-3-Clause
+//go:build !darwin && !linux && !freebsd && !openbsd && !netbsd && !windows && !solaris && !aix
 
 package disk
 
 import (
 	"context"
 
-	"github.com/shirou/gopsutil/internal/common"
+	"github.com/shirou/gopsutil/v4/internal/common"
 )
 
-func IOCounters(names ...string) (map[string]IOCountersStat, error) {
-	return IOCountersWithContext(context.Background(), names...)
-}
-
-func IOCountersWithContext(ctx context.Context, names ...string) (map[string]IOCountersStat, error) {
+func IOCountersWithContext(_ context.Context, _ ...string) (map[string]IOCountersStat, error) {
 	return nil, common.ErrNotImplementedError
 }
 
-func Partitions(all bool) ([]PartitionStat, error) {
-	return PartitionsWithContext(context.Background(), all)
-}
-
-func PartitionsWithContext(ctx context.Context, all bool) ([]PartitionStat, error) {
+func PartitionsWithContext(_ context.Context, _ bool) ([]PartitionStat, error) {
 	return []PartitionStat{}, common.ErrNotImplementedError
 }
 
-func Usage(path string) (*UsageStat, error) {
-	return UsageWithContext(context.Background(), path)
+func UsageWithContext(_ context.Context, _ string) (*UsageStat, error) {
+	return nil, common.ErrNotImplementedError
 }
 
-func UsageWithContext(ctx context.Context, path string) (*UsageStat, error) {
-	return nil, common.ErrNotImplementedError
+func SerialNumberWithContext(_ context.Context, _ string) (string, error) {
+	return "", common.ErrNotImplementedError
+}
+
+func LabelWithContext(_ context.Context, _ string) (string, error) {
+	return "", common.ErrNotImplementedError
 }

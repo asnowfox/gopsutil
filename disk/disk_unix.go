@@ -1,4 +1,5 @@
-// +build freebsd linux darwin
+// SPDX-License-Identifier: BSD-3-Clause
+//go:build freebsd || linux || darwin || aix
 
 package disk
 
@@ -9,14 +10,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Usage returns a file system usage. path is a filesystem path such
-// as "/", not device file path like "/dev/vda1".  If you want to use
-// a return value of disk.Partitions, use "Mountpoint" not "Device".
-func Usage(path string) (*UsageStat, error) {
-	return UsageWithContext(context.Background(), path)
-}
-
-func UsageWithContext(ctx context.Context, path string) (*UsageStat, error) {
+func UsageWithContext(_ context.Context, path string) (*UsageStat, error) {
 	stat := unix.Statfs_t{}
 	err := unix.Statfs(path, &stat)
 	if err != nil {
@@ -29,8 +23,18 @@ func UsageWithContext(ctx context.Context, path string) (*UsageStat, error) {
 		Fstype:      getFsType(stat),
 		Total:       (uint64(stat.Blocks) * uint64(bsize)),
 		Free:        (uint64(stat.Bavail) * uint64(bsize)),
-		InodesTotal: (uint64(stat.Files)),
-		InodesFree:  (uint64(stat.Ffree)),
+		InodesTotal: uint64(stat.Files),
+		InodesFree:  uint64(stat.Ffree),
+	}
+
+	ret.Used = (uint64(stat.Blocks) - uint64(stat.Bfree)) * uint64(bsize)
+
+	if (ret.Used + ret.Free) == 0 {
+		ret.UsedPercent = 0
+	} else {
+		// We don't use ret.Total to calculate percent.
+		// see https://github.com/shirou/gopsutil/issues/562
+		ret.UsedPercent = (float64(ret.Used) / float64(ret.Used+ret.Free)) * 100.0
 	}
 
 	// if could not get InodesTotal, return empty
@@ -39,20 +43,11 @@ func UsageWithContext(ctx context.Context, path string) (*UsageStat, error) {
 	}
 
 	ret.InodesUsed = (ret.InodesTotal - ret.InodesFree)
-	ret.Used = (uint64(stat.Blocks) - uint64(stat.Bfree)) * uint64(bsize)
 
 	if ret.InodesTotal == 0 {
 		ret.InodesUsedPercent = 0
 	} else {
 		ret.InodesUsedPercent = (float64(ret.InodesUsed) / float64(ret.InodesTotal)) * 100.0
-	}
-
-	if (ret.Used + ret.Free) == 0 {
-		ret.UsedPercent = 0
-	} else {
-		// We don't use ret.Total to calculate percent.
-		// see https://github.com/shirou/gopsutil/issues/562
-		ret.UsedPercent = (float64(ret.Used) / float64(ret.Used+ret.Free)) * 100.0
 	}
 
 	return ret, nil

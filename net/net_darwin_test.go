@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-3-Clause
 package net
 
 import (
@@ -30,7 +31,7 @@ en0   1500  <Link#4>    a8:66:7f:dd:ee:ff  5708989     0 7295722068  3494252    
 en0   1500  fe80::aa66: fe80:4::aa66:7fff  5708989     - 7295722068  3494252     -  379533492     -   -`
 )
 
-func TestparseNetstatLineHeader(t *testing.T) {
+func TestParseNetstatLineHeader(t *testing.T) {
 	stat, linkIkd, err := parseNetstatLine(`Name  Mtu   Network       Address            Ipkts Ierrs     Ibytes    Opkts Oerrs     Obytes  Coll Drop`)
 	assert.Nil(t, linkIkd)
 	assert.Nil(t, stat)
@@ -38,17 +39,44 @@ func TestparseNetstatLineHeader(t *testing.T) {
 	assert.Equal(t, errNetstatHeader, err)
 }
 
-func assertLoopbackStat(t *testing.T, err error, stat *IOCountersStat) {
-	assert.NoError(t, err)
-	assert.Equal(t, 869107, stat.PacketsRecv)
-	assert.Equal(t, 0, stat.Errin)
-	assert.Equal(t, 169411755, stat.BytesRecv)
-	assert.Equal(t, 869108, stat.PacketsSent)
-	assert.Equal(t, 1, stat.Errout)
-	assert.Equal(t, 169411756, stat.BytesSent)
+func TestParseNetstatLineInvalidColumnCount(t *testing.T) {
+	for _, line := range []string{
+		"",
+		"lo0",
+		"lo0 16384",
+		"lo0 16384 <Link#1> 0 0 0 0 0 0 0",
+		"lo0 16384 <Link#1> address 0 0 0 0 0 0 0 0 0 0",
+	} {
+		t.Run(line, func(t *testing.T) {
+			stat, linkID, err := parseNetstatLine(line)
+			assert.Nil(t, stat)
+			assert.Nil(t, linkID)
+			assert.Error(t, err)
+		})
+	}
 }
 
-func TestparseNetstatLineLink(t *testing.T) {
+func assertLoopbackStat(t *testing.T, err error, stat *IOCountersStat) {
+	t.Helper()
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(869107), stat.PacketsRecv)
+	assert.Equal(t, uint64(0), stat.Errin)
+	assert.Equal(t, uint64(169411755), stat.BytesRecv)
+	assert.Equal(t, uint64(869108), stat.PacketsSent)
+	assert.Equal(t, uint64(1), stat.Errout)
+	assert.Equal(t, uint64(169411756), stat.BytesSent)
+}
+
+func TestParseNetstatLineNoAddressWithDrop(t *testing.T) {
+	stat, linkID, err := parseNetstatLine(
+		`gif0* 1280  <Link#2>                             5     0          0        0     0          0     0   3`,
+	)
+	assert.NoError(t, err)
+	assert.NotNil(t, linkID)
+	assert.Equal(t, uint64(3), stat.Dropout)
+}
+
+func TestParseNetstatLineLink(t *testing.T) {
 	stat, linkID, err := parseNetstatLine(
 		`lo0   16384 <Link#1>                        869107     0  169411755   869108     1  169411756     0   0`,
 	)
@@ -57,7 +85,7 @@ func TestparseNetstatLineLink(t *testing.T) {
 	assert.Equal(t, uint(1), *linkID)
 }
 
-func TestparseNetstatLineIPv6(t *testing.T) {
+func TestParseNetstatLineIPv6(t *testing.T) {
 	stat, linkID, err := parseNetstatLine(
 		`lo0   16384 ::1/128     ::1                 869107     -  169411755   869108     1  169411756     -   -`,
 	)
@@ -65,7 +93,7 @@ func TestparseNetstatLineIPv6(t *testing.T) {
 	assert.Nil(t, linkID)
 }
 
-func TestparseNetstatLineIPv4(t *testing.T) {
+func TestParseNetstatLineIPv4(t *testing.T) {
 	stat, linkID, err := parseNetstatLine(
 		`lo0   16384 127           127.0.0.1         869107     -  169411755   869108     1  169411756     -   -`,
 	)
@@ -74,11 +102,10 @@ func TestparseNetstatLineIPv4(t *testing.T) {
 }
 
 func TestParseNetstatOutput(t *testing.T) {
-	nsInterfaces, err := parseNetstatOutput(netstatNotTruncated)
-	assert.NoError(t, err)
+	nsInterfaces := parseNetstatOutput(netstatNotTruncated)
 	assert.Len(t, nsInterfaces, 8)
 	for index := range nsInterfaces {
-		assert.NotNil(t, nsInterfaces[index].stat, "Index %d", index)
+		assert.NotNilf(t, nsInterfaces[index].stat, "Index %d", index)
 	}
 
 	assert.NotNil(t, nsInterfaces[0].linkID)
@@ -104,12 +131,30 @@ func TestParseNetstatOutput(t *testing.T) {
 	assert.Len(t, mapUsage.notTruncated(), 4)
 }
 
+func TestParseNetstatOutputSkipsMalformedLines(t *testing.T) {
+	diagnosticOutput := "netstat: sysctl IFDATA_SUPPLEMENTAL: Operation not permitted\nnetstat:"
+
+	for _, test := range []struct {
+		name      string
+		output    string
+		wantCount int
+	}{
+		{name: "diagnostics only", output: diagnosticOutput},
+		{name: "diagnostics before table", output: diagnosticOutput + "\n" + netstatNotTruncated, wantCount: 8},
+		{name: "diagnostics after table", output: netstatNotTruncated + "\n" + diagnosticOutput, wantCount: 8},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			nsInterfaces := parseNetstatOutput(test.output)
+			assert.Len(t, nsInterfaces, test.wantCount)
+		})
+	}
+}
+
 func TestParseNetstatTruncated(t *testing.T) {
-	nsInterfaces, err := parseNetstatOutput(netstatTruncated)
-	assert.NoError(t, err)
+	nsInterfaces := parseNetstatOutput(netstatTruncated)
 	assert.Len(t, nsInterfaces, 11)
 	for index := range nsInterfaces {
-		assert.NotNil(t, nsInterfaces[index].stat, "Index %d", index)
+		assert.NotNilf(t, nsInterfaces[index].stat, "Index %d", index)
 	}
 
 	const truncatedIface = "utun8"
@@ -136,5 +181,5 @@ func TestParseNetstatTruncated(t *testing.T) {
 
 	mapUsage := newMapInterfaceNameUsage(nsInterfaces)
 	assert.True(t, mapUsage.isTruncated())
-	assert.Equal(t, 3, len(mapUsage.notTruncated()), "en0, gif0 and stf0")
+	assert.Lenf(t, mapUsage.notTruncated(), 3, "en0, gif0 and stf0")
 }

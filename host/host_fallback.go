@@ -1,65 +1,46 @@
-// +build !darwin,!linux,!freebsd,!openbsd,!solaris,!windows
+// SPDX-License-Identifier: BSD-3-Clause
+//go:build !darwin && !linux && !freebsd && !openbsd && !netbsd && !solaris && !windows && !aix
 
 package host
 
 import (
 	"context"
 
-	"github.com/shirou/gopsutil/internal/common"
+	"github.com/shirou/gopsutil/v4/internal/common"
 )
 
-func Info() (*InfoStat, error) {
-	return InfoWithContext(context.Background())
-}
-
-func InfoWithContext(ctx context.Context) (*InfoStat, error) {
-	return nil, common.ErrNotImplementedError
-}
-
-func BootTime() (uint64, error) {
-	return BootTimeWithContext(context.Background())
-}
-
-func BootTimeWithContext(ctx context.Context) (uint64, error) {
-	return 0, common.ErrNotImplementedError
-}
-
-func Uptime() (uint64, error) {
-	return UptimeWithContext(context.Background())
-}
-
-func UptimeWithContext(ctx context.Context) (uint64, error) {
-	return 0, common.ErrNotImplementedError
-}
-
-func Users() ([]UserStat, error) {
-	return UsersWithContext(context.Background())
-}
-
-func UsersWithContext(ctx context.Context) ([]UserStat, error) {
-	return []UserStat{}, common.ErrNotImplementedError
-}
-
-func Virtualization() (string, string, error) {
-	return VirtualizationWithContext(context.Background())
-}
-
-func VirtualizationWithContext(ctx context.Context) (string, string, error) {
-	return "", "", common.ErrNotImplementedError
-}
-
-func KernelVersion() (string, error) {
-	return KernelVersionWithContext(context.Background())
-}
-
-func KernelVersionWithContext(ctx context.Context) (string, error) {
+func HostIDWithContext(_ context.Context) (string, error) {
 	return "", common.ErrNotImplementedError
 }
 
-func PlatformInformation() (string, string, string, error) {
-	return PlatformInformationWithContext(context.Background())
+func numProcs(_ context.Context) (uint64, error) {
+	return 0, common.ErrNotImplementedError
 }
 
-func PlatformInformationWithContext(ctx context.Context) (string, string, string, error) {
+func BootTimeWithContext(_ context.Context) (uint64, error) {
+	return 0, common.ErrNotImplementedError
+}
+
+func UptimeWithContext(_ context.Context) (uint64, error) {
+	return 0, common.ErrNotImplementedError
+}
+
+func UsersWithContext(_ context.Context) ([]UserStat, error) {
+	return []UserStat{}, common.ErrNotImplementedError
+}
+
+func VirtualizationWithContext(_ context.Context) (string, string, error) {
+	return "", "", common.ErrNotImplementedError
+}
+
+func KernelVersionWithContext(_ context.Context) (string, error) {
+	return "", common.ErrNotImplementedError
+}
+
+func PlatformInformationWithContext(_ context.Context) (string, string, string, error) {
 	return "", "", "", common.ErrNotImplementedError
+}
+
+func KernelArch() (string, error) {
+	return "", common.ErrNotImplementedError
 }

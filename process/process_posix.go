@@ -1,9 +1,11 @@
-// +build linux freebsd openbsd darwin
+// SPDX-License-Identifier: BSD-3-Clause
+//go:build linux || freebsd || openbsd || darwin || solaris
 
 package process
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/user"
@@ -13,14 +15,20 @@ import (
 	"syscall"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/shirou/gopsutil/v4/internal/common"
 )
+
+type Signal = syscall.Signal
 
 // POSIX
 func getTerminalMap() (map[uint64]string, error) {
 	ret := make(map[uint64]string)
 	var termfiles []string
 
-	d, err := os.Open("/dev")
+	devPath := common.HostDev()
+
+	d, err := os.Open(devPath)
 	if err != nil {
 		return nil, err
 	}
@@ -31,43 +39,65 @@ func getTerminalMap() (map[uint64]string, error) {
 		return nil, err
 	}
 	for _, devname := range devnames {
-		if strings.HasPrefix(devname, "/dev/tty") {
-			termfiles = append(termfiles, "/dev/tty/"+devname)
+		if strings.HasPrefix(devname, "tty") {
+			termfiles = append(termfiles, filepath.Join(devPath, devname))
 		}
 	}
 
 	var ptsnames []string
-	ptsd, err := os.Open("/dev/pts")
+	ptsPath := filepath.Join(devPath, "pts")
+	ptsd, err := os.Open(ptsPath)
 	if err != nil {
-		ptsnames, _ = filepath.Glob("/dev/ttyp*")
+		ptsnames, _ = filepath.Glob(filepath.Join(devPath, "ttyp*"))
 		if ptsnames == nil {
 			return nil, err
 		}
-	}
-	defer ptsd.Close()
-
-	if ptsnames == nil {
+		termfiles = append(termfiles, ptsnames...)
+	} else {
 		defer ptsd.Close()
 		ptsnames, err = ptsd.Readdirnames(-1)
 		if err != nil {
 			return nil, err
 		}
 		for _, ptsname := range ptsnames {
-			termfiles = append(termfiles, "/dev/pts/"+ptsname)
+			termfiles = append(termfiles, filepath.Join(ptsPath, ptsname))
 		}
-	} else {
-		termfiles = ptsnames
 	}
 
 	for _, name := range termfiles {
 		stat := unix.Stat_t{}
-		if err = unix.Stat(name, &stat); err != nil {
+		err = unix.Stat(name, &stat)
+		if err != nil {
 			return nil, err
 		}
 		rdev := uint64(stat.Rdev)
-		ret[rdev] = strings.Replace(name, "/dev", "", -1)
+		ret[rdev] = strings.TrimPrefix(name, devPath+string(os.PathSeparator))
 	}
 	return ret, nil
+}
+
+// isMount is a port of python's os.path.ismount()
+// https://github.com/python/cpython/blob/08ff4369afca84587b1c82034af4e9f64caddbf2/Lib/posixpath.py#L186-L216
+// https://docs.python.org/3/library/os.path.html#os.path.ismount
+func isMount(path string) bool {
+	// Check symlinkness with os.Lstat; unix.DT_LNK is not portable
+	fileInfo, err := os.Lstat(path)
+	if err != nil {
+		return false
+	}
+	if fileInfo.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	var stat1 unix.Stat_t
+	if err := unix.Lstat(path, &stat1); err != nil {
+		return false
+	}
+	parent := filepath.Join(path, "..")
+	var stat2 unix.Stat_t
+	if err := unix.Lstat(parent, &stat2); err != nil {
+		return false
+	}
+	return stat1.Dev != stat2.Dev || stat1.Ino == stat2.Ino
 }
 
 func PidExistsWithContext(ctx context.Context, pid int32) (bool, error) {
@@ -78,15 +108,26 @@ func PidExistsWithContext(ctx context.Context, pid int32) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	defer proc.Release()
+
+	if isMount(common.HostProcWithContext(ctx)) { // if /<HOST_PROC>/proc exists and is mounted, check if /<HOST_PROC>/proc/<PID> folder exists
+		_, err := os.Stat(common.HostProcWithContext(ctx, strconv.Itoa(int(pid))))
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return err == nil, err
+	}
+
+	// procfs does not exist or is not mounted, check PID existence by signalling the pid
 	err = proc.Signal(syscall.Signal(0))
 	if err == nil {
 		return true, nil
 	}
-	if err.Error() == "os: process already finished" {
+	if errors.Is(err, os.ErrProcessDone) {
 		return false, nil
 	}
-	errno, ok := err.(syscall.Errno)
-	if !ok {
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
 		return false, err
 	}
 	switch errno {
@@ -95,20 +136,16 @@ func PidExistsWithContext(ctx context.Context, pid int32) (bool, error) {
 	case syscall.EPERM:
 		return true, nil
 	}
+
 	return false, err
 }
 
-// SendSignal sends a unix.Signal to the process.
-// Currently, SIGSTOP, SIGCONT, SIGTERM and SIGKILL are supported.
-func (p *Process) SendSignal(sig syscall.Signal) error {
-	return p.SendSignalWithContext(context.Background(), sig)
-}
-
-func (p *Process) SendSignalWithContext(ctx context.Context, sig syscall.Signal) error {
+func (p *Process) SendSignalWithContext(_ context.Context, sig syscall.Signal) error {
 	process, err := os.FindProcess(int(p.Pid))
 	if err != nil {
 		return err
 	}
+	defer process.Release()
 
 	err = process.Signal(sig)
 	if err != nil {
@@ -118,49 +155,24 @@ func (p *Process) SendSignalWithContext(ctx context.Context, sig syscall.Signal)
 	return nil
 }
 
-// Suspend sends SIGSTOP to the process.
-func (p *Process) Suspend() error {
-	return p.SuspendWithContext(context.Background())
-}
-
 func (p *Process) SuspendWithContext(ctx context.Context) error {
-	return p.SendSignal(unix.SIGSTOP)
-}
-
-// Resume sends SIGCONT to the process.
-func (p *Process) Resume() error {
-	return p.ResumeWithContext(context.Background())
+	return p.SendSignalWithContext(ctx, unix.SIGSTOP)
 }
 
 func (p *Process) ResumeWithContext(ctx context.Context) error {
-	return p.SendSignal(unix.SIGCONT)
-}
-
-// Terminate sends SIGTERM to the process.
-func (p *Process) Terminate() error {
-	return p.TerminateWithContext(context.Background())
+	return p.SendSignalWithContext(ctx, unix.SIGCONT)
 }
 
 func (p *Process) TerminateWithContext(ctx context.Context) error {
-	return p.SendSignal(unix.SIGTERM)
-}
-
-// Kill sends SIGKILL to the process.
-func (p *Process) Kill() error {
-	return p.KillWithContext(context.Background())
+	return p.SendSignalWithContext(ctx, unix.SIGTERM)
 }
 
 func (p *Process) KillWithContext(ctx context.Context) error {
-	return p.SendSignal(unix.SIGKILL)
-}
-
-// Username returns a username of the process.
-func (p *Process) Username() (string, error) {
-	return p.UsernameWithContext(context.Background())
+	return p.SendSignalWithContext(ctx, unix.SIGKILL)
 }
 
 func (p *Process) UsernameWithContext(ctx context.Context) (string, error) {
-	uids, err := p.Uids()
+	uids, err := p.UidsWithContext(ctx)
 	if err != nil {
 		return "", err
 	}

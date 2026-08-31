@@ -1,21 +1,23 @@
+// SPDX-License-Identifier: BSD-3-Clause
 package cpu
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/shirou/gopsutil/internal/common"
+	"github.com/shirou/gopsutil/v4/internal/common"
 )
 
 // TimesStat contains the amounts of time the CPU has spent performing different
-// kinds of work. Time units are in USER_HZ or Jiffies (typically hundredths of
-// a second). It is based on linux /proc/stat file.
+// kinds of work. Time units are in seconds. It is based on linux /proc/stat file.
 type TimesStat struct {
 	CPU       string  `json:"cpu"`
 	User      float64 `json:"user"`
@@ -52,8 +54,10 @@ type lastPercent struct {
 	lastPerCPUTimes []TimesStat
 }
 
-var lastCPUPercent lastPercent
-var invoke common.Invoker = common.Invoke{}
+var (
+	lastCPUPercent lastPercent
+	invoke         common.Invoker = common.Invoke{}
+)
 
 func init() {
 	lastCPUPercent.Lock()
@@ -85,10 +89,12 @@ func (c TimesStat) String() string {
 	return `{` + strings.Join(v, ",") + `}`
 }
 
-// Total returns the total number of seconds in a CPUTimesStat
+// Deprecated: Total returns the total number of seconds in a CPUTimesStat
+// Please do not use this internal function.
 func (c TimesStat) Total() float64 {
-	total := c.User + c.System + c.Nice + c.Iowait + c.Irq + c.Softirq + c.Steal +
-		c.Guest + c.GuestNice + c.Idle
+	total := c.User + c.System + c.Idle + c.Nice + c.Iowait + c.Irq +
+		c.Softirq + c.Steal + c.Guest + c.GuestNice
+
 	return total
 }
 
@@ -98,9 +104,15 @@ func (c InfoStat) String() string {
 }
 
 func getAllBusy(t TimesStat) (float64, float64) {
-	busy := t.User + t.System + t.Nice + t.Iowait + t.Irq +
-		t.Softirq + t.Steal + t.Guest + t.GuestNice
-	return busy + t.Idle, busy
+	tot := t.Total()
+	if runtime.GOOS == "linux" {
+		tot -= t.Guest     // Linux 2.6.24+
+		tot -= t.GuestNice // Linux 3.2.0+
+	}
+
+	busy := tot - t.Idle - t.Iowait
+
+	return tot, busy
 }
 
 func calculateBusy(t1, t2 TimesStat) float64 {
@@ -141,19 +153,21 @@ func Percent(interval time.Duration, percpu bool) ([]float64, error) {
 
 func PercentWithContext(ctx context.Context, interval time.Duration, percpu bool) ([]float64, error) {
 	if interval <= 0 {
-		return percentUsedFromLastCall(percpu)
+		return percentUsedFromLastCallWithContext(ctx, percpu)
 	}
 
 	// Get CPU usage at the start of the interval.
-	cpuTimes1, err := Times(percpu)
+	cpuTimes1, err := TimesWithContext(ctx, percpu)
 	if err != nil {
 		return nil, err
 	}
 
-	time.Sleep(interval)
+	if err := common.Sleep(ctx, interval); err != nil {
+		return nil, err
+	}
 
 	// And at the end of the interval.
-	cpuTimes2, err := Times(percpu)
+	cpuTimes2, err := TimesWithContext(ctx, percpu)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +176,11 @@ func PercentWithContext(ctx context.Context, interval time.Duration, percpu bool
 }
 
 func percentUsedFromLastCall(percpu bool) ([]float64, error) {
-	cpuTimes, err := Times(percpu)
+	return percentUsedFromLastCallWithContext(context.Background(), percpu)
+}
+
+func percentUsedFromLastCallWithContext(ctx context.Context, percpu bool) ([]float64, error) {
+	cpuTimes, err := TimesWithContext(ctx, percpu)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +196,7 @@ func percentUsedFromLastCall(percpu bool) ([]float64, error) {
 	}
 
 	if lastTimes == nil {
-		return nil, fmt.Errorf("error getting times for cpu percent. lastTimes was nil")
+		return nil, errors.New("error getting times for cpu percent. lastTimes was nil")
 	}
 	return calculateAllBusy(lastTimes, cpuTimes)
 }

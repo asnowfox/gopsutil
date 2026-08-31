@@ -1,4 +1,5 @@
-// +build openbsd
+// SPDX-License-Identifier: BSD-3-Clause
+//go:build openbsd
 
 package mem
 
@@ -8,27 +9,18 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"os/exec"
 
-	"github.com/shirou/gopsutil/internal/common"
+	"golang.org/x/sys/unix"
+
+	"github.com/shirou/gopsutil/v4/internal/common"
 )
 
 func GetPageSize() (uint64, error) {
 	return GetPageSizeWithContext(context.Background())
 }
 
-func GetPageSizeWithContext(ctx context.Context) (uint64, error) {
-	mib := []int32{CTLVm, VmUvmexp}
-	buf, length, err := common.CallSyscall(mib)
-	if err != nil {
-		return 0, err
-	}
-	if length < sizeOfUvmexp {
-		return 0, fmt.Errorf("short syscall ret %d bytes", length)
-	}
-	var uvmexp Uvmexp
-	br := bytes.NewReader(buf)
-	err = common.Read(br, binary.LittleEndian, &uvmexp)
+func GetPageSizeWithContext(_ context.Context) (uint64, error) {
+	uvmexp, err := unix.SysctlUvmexp("vm.uvmexp")
 	if err != nil {
 		return 0, err
 	}
@@ -39,38 +31,15 @@ func VirtualMemory() (*VirtualMemoryStat, error) {
 	return VirtualMemoryWithContext(context.Background())
 }
 
-func VirtualMemoryWithContext(ctx context.Context) (*VirtualMemoryStat, error) {
-	mib := []int32{CTLVm, VmUvmexp}
-	buf, length, err := common.CallSyscall(mib)
-	if err != nil {
-		return nil, err
-	}
-	if length < sizeOfUvmexp {
-		return nil, fmt.Errorf("short syscall ret %d bytes", length)
-	}
-	var uvmexp Uvmexp
-	br := bytes.NewReader(buf)
-	err = common.Read(br, binary.LittleEndian, &uvmexp)
+func VirtualMemoryWithContext(_ context.Context) (*VirtualMemoryStat, error) {
+	uvmexp, err := unix.SysctlUvmexp("vm.uvmexp")
 	if err != nil {
 		return nil, err
 	}
 	p := uint64(uvmexp.Pagesize)
 
-	ret := &VirtualMemoryStat{
-		Total:    uint64(uvmexp.Npages) * p,
-		Free:     uint64(uvmexp.Free) * p,
-		Active:   uint64(uvmexp.Active) * p,
-		Inactive: uint64(uvmexp.Inactive) * p,
-		Cached:   0, // not available
-		Wired:    uint64(uvmexp.Wired) * p,
-	}
-
-	ret.Available = ret.Inactive + ret.Cached + ret.Free
-	ret.Used = ret.Total - ret.Available
-	ret.UsedPercent = float64(ret.Used) / float64(ret.Total) * 100.0
-
-	mib = []int32{CTLVfs, VfsGeneric, VfsBcacheStat}
-	buf, length, err = common.CallSyscall(mib)
+	mib := []int32{CTLVfs, VfsGeneric, VfsBcacheStat}
+	buf, length, err := common.CallSyscall(mib)
 	if err != nil {
 		return nil, err
 	}
@@ -78,12 +47,27 @@ func VirtualMemoryWithContext(ctx context.Context) (*VirtualMemoryStat, error) {
 		return nil, fmt.Errorf("short syscall ret %d bytes", length)
 	}
 	var bcs Bcachestats
-	br = bytes.NewReader(buf)
-	err = common.Read(br, binary.LittleEndian, &bcs)
-	if err != nil {
+	br := bytes.NewReader(buf)
+	if err := binary.Read(br, binary.LittleEndian, &bcs); err != nil {
 		return nil, err
 	}
-	ret.Buffers = uint64(bcs.Numbufpages) * p
+	// On OpenBSD, the buffer cache is the closest equivalent to both
+	// Linux's Buffers and Cached memory.
+	bcache := uint64(bcs.Numbufpages) * p
+
+	ret := &VirtualMemoryStat{
+		Total:    uint64(uvmexp.Npages) * p,
+		Free:     uint64(uvmexp.Free) * p,
+		Active:   uint64(uvmexp.Active) * p,
+		Inactive: uint64(uvmexp.Inactive) * p,
+		Cached:   bcache,
+		Buffers:  bcache,
+		Wired:    uint64(uvmexp.Wired) * p,
+	}
+
+	ret.Available = ret.Inactive + ret.Cached + ret.Free
+	ret.Used = ret.Total - ret.Available
+	ret.UsedPercent = float64(ret.Used) / float64(ret.Total) * 100.0
 
 	return ret, nil
 }
@@ -94,12 +78,7 @@ func SwapMemory() (*SwapMemoryStat, error) {
 }
 
 func SwapMemoryWithContext(ctx context.Context) (*SwapMemoryStat, error) {
-	swapctl, err := exec.LookPath("swapctl")
-	if err != nil {
-		return nil, err
-	}
-
-	out, err := invoke.CommandWithContext(ctx, swapctl, "-sk")
+	out, err := invoke.CommandWithContext(ctx, "swapctl", "-sk")
 	if err != nil {
 		return &SwapMemoryStat{}, nil
 	}

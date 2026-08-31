@@ -1,9 +1,10 @@
+// SPDX-License-Identifier: BSD-3-Clause
 package load
 
 import (
 	"encoding/json"
 
-	"github.com/shirou/gopsutil/internal/common"
+	"github.com/shirou/gopsutil/v4/internal/common"
 )
 
 var invoke common.Invoker = common.Invoke{}
@@ -21,6 +22,7 @@ func (l AvgStat) String() string {
 
 type MiscStat struct {
 	ProcsTotal   int `json:"procsTotal"`
+	ProcsCreated int `json:"procsCreated"`
 	ProcsRunning int `json:"procsRunning"`
 	ProcsBlocked int `json:"procsBlocked"`
 	Ctxt         int `json:"ctxt"`

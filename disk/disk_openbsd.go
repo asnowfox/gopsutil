@@ -1,4 +1,5 @@
-// +build openbsd
+// SPDX-License-Identifier: BSD-3-Clause
+//go:build openbsd
 
 package disk
 
@@ -6,62 +7,62 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"path"
-	"unsafe"
 
-	"github.com/shirou/gopsutil/internal/common"
 	"golang.org/x/sys/unix"
+
+	"github.com/shirou/gopsutil/v4/internal/common"
 )
 
-func Partitions(all bool) ([]PartitionStat, error) {
-	return PartitionsWithContext(context.Background(), all)
-}
-
-func PartitionsWithContext(ctx context.Context, all bool) ([]PartitionStat, error) {
+func PartitionsWithContext(_ context.Context, _ bool) ([]PartitionStat, error) {
 	var ret []PartitionStat
 
 	// get length
-	count, err := unix.Getfsstat(nil, MNT_WAIT)
+	count, err := unix.Getfsstat(nil, unix.MNT_WAIT)
 	if err != nil {
 		return ret, err
 	}
 
-	fs := make([]Statfs, count)
-	if _, err = Getfsstat(fs, MNT_WAIT); err != nil {
+	fs := make([]unix.Statfs_t, count)
+	if _, err = unix.Getfsstat(fs, unix.MNT_WAIT); err != nil {
 		return ret, err
 	}
 
-	for _, stat := range fs {
-		opts := "rw"
-		if stat.F_flags&MNT_RDONLY != 0 {
-			opts = "ro"
+	for i := range fs {
+		stat := &fs[i]
+		opts := []string{"rw"}
+		if stat.F_flags&unix.MNT_RDONLY != 0 {
+			opts = []string{"rw"}
 		}
-		if stat.F_flags&MNT_SYNCHRONOUS != 0 {
-			opts += ",sync"
+		if stat.F_flags&unix.MNT_SYNCHRONOUS != 0 {
+			opts = append(opts, "sync")
 		}
-		if stat.F_flags&MNT_NOEXEC != 0 {
-			opts += ",noexec"
+		if stat.F_flags&unix.MNT_NOEXEC != 0 {
+			opts = append(opts, "noexec")
 		}
-		if stat.F_flags&MNT_NOSUID != 0 {
-			opts += ",nosuid"
+		if stat.F_flags&unix.MNT_NOSUID != 0 {
+			opts = append(opts, "nosuid")
 		}
-		if stat.F_flags&MNT_NODEV != 0 {
-			opts += ",nodev"
+		if stat.F_flags&unix.MNT_NODEV != 0 {
+			opts = append(opts, "nodev")
 		}
-		if stat.F_flags&MNT_ASYNC != 0 {
-			opts += ",async"
+		if stat.F_flags&unix.MNT_ASYNC != 0 {
+			opts = append(opts, "async")
+		}
+		if stat.F_flags&unix.MNT_SOFTDEP != 0 {
+			opts = append(opts, "softdep")
+		}
+		if stat.F_flags&unix.MNT_NOATIME != 0 {
+			opts = append(opts, "noatime")
+		}
+		if stat.F_flags&unix.MNT_WXALLOWED != 0 {
+			opts = append(opts, "wxallowed")
 		}
 
 		d := PartitionStat{
-			Device:     common.IntToString(stat.F_mntfromname[:]),
-			Mountpoint: common.IntToString(stat.F_mntonname[:]),
-			Fstype:     common.IntToString(stat.F_fstypename[:]),
+			Device:     common.ByteToString(stat.F_mntfromname[:]),
+			Mountpoint: common.ByteToString(stat.F_mntonname[:]),
+			Fstype:     common.ByteToString(stat.F_fstypename[:]),
 			Opts:       opts,
-		}
-		if all == false {
-			if !path.IsAbs(d.Device) || !common.PathExists(d.Device) {
-				continue
-			}
 		}
 
 		ret = append(ret, d)
@@ -70,11 +71,7 @@ func PartitionsWithContext(ctx context.Context, all bool) ([]PartitionStat, erro
 	return ret, nil
 }
 
-func IOCounters(names ...string) (map[string]IOCountersStat, error) {
-	return IOCountersWithContext(context.Background(), names...)
-}
-
-func IOCountersWithContext(ctx context.Context, names ...string) (map[string]IOCountersStat, error) {
+func IOCountersWithContext(_ context.Context, names ...string) (map[string]IOCountersStat, error) {
 	ret := make(map[string]IOCountersStat)
 
 	r, err := unix.SysctlRaw("hw.diskstats")
@@ -114,44 +111,17 @@ func IOCountersWithContext(ctx context.Context, names ...string) (map[string]IOC
 
 // BT2LD(time)     ((long double)(time).sec + (time).frac * BINTIME_SCALE)
 
-// Getfsstat is borrowed from pkg/syscall/syscall_freebsd.go
-// change Statfs_t to Statfs in order to get more information
-func Getfsstat(buf []Statfs, flags int) (n int, err error) {
-	return GetfsstatWithContext(context.Background(), buf, flags)
-}
-
-func GetfsstatWithContext(ctx context.Context, buf []Statfs, flags int) (n int, err error) {
-	var _p0 unsafe.Pointer
-	var bufsize uintptr
-	if len(buf) > 0 {
-		_p0 = unsafe.Pointer(&buf[0])
-		bufsize = unsafe.Sizeof(Statfs{}) * uintptr(len(buf))
-	}
-	r0, _, e1 := unix.Syscall(unix.SYS_GETFSSTAT, uintptr(_p0), bufsize, uintptr(flags))
-	n = int(r0)
-	if e1 != 0 {
-		err = e1
-	}
-	return
-}
-
 func parseDiskstats(buf []byte) (Diskstats, error) {
 	var ds Diskstats
 	br := bytes.NewReader(buf)
-	//	err := binary.Read(br, binary.LittleEndian, &ds)
-	err := common.Read(br, binary.LittleEndian, &ds)
-	if err != nil {
+	if err := binary.Read(br, binary.LittleEndian, &ds); err != nil {
 		return ds, err
 	}
 
 	return ds, nil
 }
 
-func Usage(path string) (*UsageStat, error) {
-	return UsageWithContext(context.Background(), path)
-}
-
-func UsageWithContext(ctx context.Context, path string) (*UsageStat, error) {
+func UsageWithContext(_ context.Context, path string) (*UsageStat, error) {
 	stat := unix.Statfs_t{}
 	err := unix.Statfs(path, &stat)
 	if err != nil {
@@ -164,8 +134,8 @@ func UsageWithContext(ctx context.Context, path string) (*UsageStat, error) {
 		Fstype:      getFsType(stat),
 		Total:       (uint64(stat.F_blocks) * uint64(bsize)),
 		Free:        (uint64(stat.F_bavail) * uint64(bsize)),
-		InodesTotal: (uint64(stat.F_files)),
-		InodesFree:  (uint64(stat.F_ffree)),
+		InodesTotal: uint64(stat.F_files),
+		InodesFree:  uint64(stat.F_ffree),
 	}
 
 	ret.InodesUsed = (ret.InodesTotal - ret.InodesFree)
@@ -177,5 +147,13 @@ func UsageWithContext(ctx context.Context, path string) (*UsageStat, error) {
 }
 
 func getFsType(stat unix.Statfs_t) string {
-	return common.IntToString(stat.F_fstypename[:])
+	return common.ByteToString(stat.F_fstypename[:])
+}
+
+func SerialNumberWithContext(_ context.Context, _ string) (string, error) {
+	return "", common.ErrNotImplementedError
+}
+
+func LabelWithContext(_ context.Context, _ string) (string, error) {
+	return "", common.ErrNotImplementedError
 }

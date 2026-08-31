@@ -1,132 +1,53 @@
-// +build darwin
+// SPDX-License-Identifier: BSD-3-Clause
+//go:build darwin
 
 package host
 
 import (
-	"bytes"
 	"context"
-	"encoding/binary"
-	"io/ioutil"
+	"errors"
+	"io"
 	"os"
-	"os/exec"
-	"runtime"
 	"strings"
-	"sync/atomic"
-	"time"
 	"unsafe"
 
-	"github.com/shirou/gopsutil/internal/common"
-	"github.com/shirou/gopsutil/process"
 	"golang.org/x/sys/unix"
+
+	"github.com/shirou/gopsutil/v4/internal/common"
+	"github.com/shirou/gopsutil/v4/process"
 )
 
 // from utmpx.h
-const USER_PROCESS = 7
+const user_PROCESS = 7 //nolint:revive //FIXME
 
-func Info() (*InfoStat, error) {
-	return InfoWithContext(context.Background())
+func HostIDWithContext(ctx context.Context) (string, error) {
+	out, err := invoke.CommandWithContext(ctx, "ioreg", "-rd1", "-c", "IOPlatformExpertDevice")
+	if err != nil {
+		return "", err
+	}
+
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, "IOPlatformUUID") {
+			parts := strings.SplitAfter(line, `" = "`)
+			if len(parts) == 2 {
+				uuid := strings.TrimRight(parts[1], `"`)
+				return strings.ToLower(uuid), nil
+			}
+		}
+	}
+
+	return "", errors.New("cannot find host id")
 }
 
-func InfoWithContext(ctx context.Context) (*InfoStat, error) {
-	ret := &InfoStat{
-		OS:             runtime.GOOS,
-		PlatformFamily: "darwin",
-	}
-
-	hostname, err := os.Hostname()
-	if err == nil {
-		ret.Hostname = hostname
-	}
-
-	kernelVersion, err := KernelVersionWithContext(ctx)
-	if err == nil {
-		ret.KernelVersion = kernelVersion
-	}
-
-	kernelArch, err := kernelArch()
-	if err == nil {
-		ret.KernelArch = kernelArch
-	}
-
-	platform, family, pver, err := PlatformInformation()
-	if err == nil {
-		ret.Platform = platform
-		ret.PlatformFamily = family
-		ret.PlatformVersion = pver
-	}
-
-	system, role, err := Virtualization()
-	if err == nil {
-		ret.VirtualizationSystem = system
-		ret.VirtualizationRole = role
-	}
-
-	boot, err := BootTime()
-	if err == nil {
-		ret.BootTime = boot
-		ret.Uptime = uptime(boot)
-	}
-
-	procs, err := process.Pids()
-	if err == nil {
-		ret.Procs = uint64(len(procs))
-	}
-
-	uuid, err := unix.Sysctl("kern.uuid")
-	if err == nil && uuid != "" {
-		ret.HostID = strings.ToLower(uuid)
-	}
-
-	return ret, nil
-}
-
-// cachedBootTime must be accessed via atomic.Load/StoreUint64
-var cachedBootTime uint64
-
-func BootTime() (uint64, error) {
-	return BootTimeWithContext(context.Background())
-}
-
-func BootTimeWithContext(ctx context.Context) (uint64, error) {
-	// https://github.com/AaronO/dashd/blob/222e32ef9f7a1f9bea4a8da2c3627c4cb992f860/probe/probe_darwin.go
-	t := atomic.LoadUint64(&cachedBootTime)
-	if t != 0 {
-		return t, nil
-	}
-	value, err := unix.Sysctl("kern.boottime")
+func numProcs(ctx context.Context) (uint64, error) {
+	procs, err := process.PidsWithContext(ctx)
 	if err != nil {
 		return 0, err
 	}
-	bytes := []byte(value[:])
-	var boottime uint64
-	boottime = uint64(bytes[0]) + uint64(bytes[1])*256 + uint64(bytes[2])*256*256 + uint64(bytes[3])*256*256*256
-
-	atomic.StoreUint64(&cachedBootTime, boottime)
-
-	return boottime, nil
+	return uint64(len(procs)), nil
 }
 
-func uptime(boot uint64) uint64 {
-	return uint64(time.Now().Unix()) - boot
-}
-
-func Uptime() (uint64, error) {
-	return UptimeWithContext(context.Background())
-}
-
-func UptimeWithContext(ctx context.Context) (uint64, error) {
-	boot, err := BootTimeWithContext(ctx)
-	if err != nil {
-		return 0, err
-	}
-	return uptime(boot), nil
-}
-
-func Users() ([]UserStat, error) {
-	return UsersWithContext(context.Background())
-}
-
-func UsersWithContext(ctx context.Context) ([]UserStat, error) {
+func UsersWithContext(_ context.Context) ([]UserStat, error) {
 	utmpfile := "/var/run/utmpx"
 	var ret []UserStat
 
@@ -136,25 +57,23 @@ func UsersWithContext(ctx context.Context) ([]UserStat, error) {
 	}
 	defer file.Close()
 
-	buf, err := ioutil.ReadAll(file)
+	buf, err := io.ReadAll(file)
 	if err != nil {
 		return ret, err
 	}
 
-	u := Utmpx{}
-	entrySize := int(unsafe.Sizeof(u))
-	count := len(buf) / entrySize
+	// Skip macOS utmpx header part
+	const ut32Size = int(unsafe.Sizeof(utmpx32{}))
+	buf = buf[ut32Size:]
 
-	for i := 0; i < count; i++ {
-		b := buf[i*entrySize : i*entrySize+entrySize]
+	count := len(buf) / ut32Size
 
-		var u Utmpx
-		br := bytes.NewReader(b)
-		err := binary.Read(br, binary.LittleEndian, &u)
-		if err != nil {
-			continue
-		}
-		if u.Type != USER_PROCESS {
+	for i := range count {
+		b := buf[i*ut32Size : i*ut32Size+ut32Size]
+
+		var u utmpx32
+		copy(unsafe.Slice((*byte)(unsafe.Pointer(&u)), len(b)), b)
+		if u.Type != user_PROCESS {
 			continue
 		}
 		user := UserStat{
@@ -167,11 +86,6 @@ func UsersWithContext(ctx context.Context) ([]UserStat, error) {
 	}
 
 	return ret, nil
-
-}
-
-func PlatformInformation() (string, string, string, error) {
-	return PlatformInformationWithContext(context.Background())
 }
 
 func PlatformInformationWithContext(ctx context.Context) (string, string, string, error) {
@@ -179,17 +93,12 @@ func PlatformInformationWithContext(ctx context.Context) (string, string, string
 	family := ""
 	pver := ""
 
-	sw_vers, err := exec.LookPath("sw_vers")
-	if err != nil {
-		return "", "", "", err
-	}
-
 	p, err := unix.Sysctl("kern.ostype")
 	if err == nil {
 		platform = strings.ToLower(p)
 	}
 
-	out, err := invoke.CommandWithContext(ctx, sw_vers, "-productVersion")
+	out, err := invoke.CommandWithContext(ctx, "sw_vers", "-productVersion")
 	if err == nil {
 		pver = strings.ToLower(strings.TrimSpace(string(out)))
 	}
@@ -207,27 +116,11 @@ func PlatformInformationWithContext(ctx context.Context) (string, string, string
 	return platform, family, pver, nil
 }
 
-func Virtualization() (string, string, error) {
-	return VirtualizationWithContext(context.Background())
-}
-
-func VirtualizationWithContext(ctx context.Context) (string, string, error) {
+func VirtualizationWithContext(_ context.Context) (string, string, error) {
 	return "", "", common.ErrNotImplementedError
 }
 
-func KernelVersion() (string, error) {
-	return KernelVersionWithContext(context.Background())
-}
-
-func KernelVersionWithContext(ctx context.Context) (string, error) {
+func KernelVersionWithContext(_ context.Context) (string, error) {
 	version, err := unix.Sysctl("kern.osrelease")
 	return strings.ToLower(version), err
-}
-
-func SensorsTemperatures() ([]TemperatureStat, error) {
-	return SensorsTemperaturesWithContext(context.Background())
-}
-
-func SensorsTemperaturesWithContext(ctx context.Context) ([]TemperatureStat, error) {
-	return []TemperatureStat{}, common.ErrNotImplementedError
 }
